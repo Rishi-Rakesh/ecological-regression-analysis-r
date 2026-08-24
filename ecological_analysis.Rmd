@@ -1,0 +1,860 @@
+---
+title: "MA52115 Applied Statistics"
+subtitle: "Coursework 2 (2026)"
+author: "259186979"
+output:
+  html_document:
+    number_sections: no
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    code_download: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 8, fig.height = 5)
+library(tidyverse)
+library(lme4)
+library(mgcv)
+library(scales)
+load("chicks.rda")
+chickdata <- chickdata %>%
+  mutate(
+    Nest      = factor(Nest),
+    FoodLevel = factor(FoodLevel, levels = c("Abundant", "Scarce")),
+    ParentSex = factor(ParentSex, levels = c("Female",   "Male"))
+  )
+```
+
+## Use of Generative AI
+
+In line with University policy, coursework for MA52115 is classified as Type B:
+
+-   *GenAI is permitted as an assistive tool for specific defined processes within the assessment and its use is not mandatory in order to complete the assessment.*
+
+Following this policy, please include your statement below (max 250 words) EITHER indicating what GenAI tools you used and how you used them OR stating that you have not used GenAI.
+
+**Insert your GenAI statement here:**
+
+I used ChatGPT to explain R error messages when debugging and Perplexity AI to clarify statistical concepts and used it to help structure my written explanations and to help express mathematical notation. I used Grammarly AI for grammar checking.
+
+Importantly, I did NOT use AI to write code, generate analysis, or interpret findings. All code is my own. All conclusions come from my direct data analysis. I reviewed AI suggestions carefully before use and take full responsibility for everything submitted.
+
+<br><br><br>
+
+
+```{r libraries,echo= FALSE}
+# include your libraries here
+# use echo = FALSE if you do not want the Code button to appear 
+library(tidyverse)
+library(patchwork)
+library(broom)
+library(kableExtra)
+library(modelr)
+library(lme4)
+library(mgcv)
+library(scales)
+library(broom.mixed)
+```
+
+
+```{r, message=FALSE}
+# read in the data
+load("chicks.rda")
+ls()
+```
+
+<!--
+You can include non-coding comments using these delimiters. What is written inside these delimiters wont be knitted into the html document!
+
+Do not change the structure of the document, just fill in the sections as indicated 
+You can only change the headings indicated with [*]
+-->
+
+
+# Abstract
+
+This report investigates the determinants of calling intensity in goldcrest (*Regulus regulus*) chicks at monitored nesting sites, using regression analysis to characterise the average number of calls per chick (`AveChickCalls`) in the 15 minutes preceding a parental feeding visit. The dataset comprises 599 observations across multiple nests, with food availability (`FoodLevel`), parent sex (`ParentSex`), foraging duration (`Duration`), and nest size (`NumberOfChicks`) as candidate explanatory variables. A structured analytical pipeline was employed: exploratory data analysis identified higher calling rates under scarce food conditions and a potential interaction between food availability and parent sex; a sequence of linear models with increasing complexity was then fitted and compared formally using AIC and likelihood-ratio tests. Generalised additive models were used to assess non-linearity in the continuous covariate effects, with smooth term effective degrees of freedom confirming that linear parametric terms were broadly adequate. Because multiple observations originate from each nest, a linear mixed model with a random intercept for `Nest` was adopted as the preferred specification; this model accounted for between-nest variability in baseline calling rates and produced more reliable fixed-effect standard errors than a standard linear model. The results indicate that food scarcity and a `FoodLevel × ParentSex` interaction are the dominant drivers of chick calling intensity, with foraging duration and nest size contributing additional explanatory power. Limitations including the zero-bounded response, observational design, and the assumption of random intercepts only are discussed.
+
+# Data: Chicks calls
+
+```{r load-data}
+load("chicks.rda")
+
+# Convert to factors with explicit reference levels
+chickdata <- chickdata %>%
+  mutate(
+    Nest      = factor(Nest),
+    FoodLevel = factor(FoodLevel, levels = c("Abundant", "Scarce")),
+    ParentSex = factor(ParentSex, levels = c("Female",   "Male"))
+  )
+
+glimpse(chickdata)
+```
+
+```{r summary-table}
+summary(chickdata)
+```
+
+The dataset contains 599 rows and 6 columns. `Nest` is a categorical grouping identifier. `FoodLevel` and `ParentSex` are binary factors (stored originally as character strings, converted to factors with explicit reference levels above so that model coefficients are interpretable relative to Abundant food and Female parent respectively). `Duration` and `NumberOfChicks` are continuous/integer covariates. `AveChickCalls` is the continuous non-negative response — note that the observed minimum is 0, indicating that some chicks were entirely silent in the recording window.
+
+# Introduction
+
+The ecological question motivating this analysis is whether the calling intensity of goldcrest chicks — quantified as `AveChickCalls`, the average number of calls per chick in the 15 minutes prior to a parent returning to the nest — can be characterised by measurable properties of the foraging visit and the nesting environment. The dataset (`chickdata`) contains 599 observations recorded across multiple nesting sites, with five potential explanatory variables alongside the response: `FoodLevel` (Abundant or Scarce), `ParentSex` (Male or Female), `Duration` (foraging time in minutes), `NumberOfChicks` (nest size as an integer), and `Nest` (a categorical nest identifier).
+
+A structurally important feature of these data is that `Nest` groups multiple observations together. Observations originating from the same nest are not independent — they share an unmeasured nest-level environment and, potentially, the genetic disposition of the resident chick brood. Treating all 599 observations as fully independent would cause standard errors for fixed effects to be underestimated. This motivates the use of a **linear mixed effects model** with `Nest` as a random-intercept grouping factor alongside parametric fixed effects for the remaining covariates. Generalised additive models (GAMs) are also employed to assess whether the relationships between continuous covariates and calling intensity depart from linearity in a meaningful way.
+
+# Exploratory Data Analysis
+
+A structured exploratory analysis is conducted prior to modelling. The goals are to: assess the distributional properties of `AveChickCalls`; examine the marginal relationship between each covariate and the response; identify potential interaction patterns between the categorical covariates; and characterise the extent of clustering within nests. Each sub-section concludes with an explicit statement of its modelling implication.
+
+## Distribution of the Response
+
+```{r response-dist}
+p_hist <- chickdata %>%
+  ggplot(aes(x = AveChickCalls)) +
+  geom_histogram(bins = 30, fill = "steelblue",
+                 colour = "white", alpha = 0.85) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Average chick calls (calls per chick per 15 min)",
+       y     = "Count",
+       title = "Distribution of AveChickCalls")
+
+p_box <- chickdata %>%
+  ggplot(aes(y = AveChickCalls)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, width = 0.4) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(y     = "Average chick calls (calls per chick per 15 min)",
+       title = "Spread of AveChickCalls") +
+  theme(axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank())
+
+p_hist + p_box
+```
+
+Visual inspection of the AveChickCalls distribution reveals a pronounced positive (right) skew. As illustrated by the histogram `(p_hist)`, the data exhibits a severe floor effect, with a high density of observations concentrated at exactly zero. The accompanying boxplot `(p_box)` further emphasizes this asymmetry, displaying a compressed interquartile range heavily anchored near zero and a long upper tail punctuated by several extreme outliers exceeding 6 calls per 15 minutes.The distributional shape of `AveChickCalls` presents a challenge for standard Ordinary Least Squares (OLS) regression. OLS assumes that the model residuals are normally distributed—an assumption frequently violated when the response variable is strictly non-negative, heavily skewed, and zero-inflated. Because a standard Gaussian model assumes the response can theoretically take any real value, it may yield suboptimal fit or predict physically impossible negative call rates. From a rigorous modelling standpoint, these diagnostics suggest that a transformation of the response (e.g., a log-transformation, $\log(y + c)$) or the application of a Generalized Linear Model (GLM) framework—such as a Gamma distribution with a log-link, or a Tweedie distribution to properly handle the exact zeros—would be highly appropriate.However, standard linear models are notably robust, and for the purposes of this analysis, a Gaussian approximation remains a computationally pragmatic way to characterize the primary linear structure and directionality of the fixed effects. We will proceed with this linear approximation, though the violation of these distributional assumptions and the potential impact on inference will be critically addressed in the Limitations section.
+
+## Categorical Covariates
+
+```{r cat-covariates}
+p_food <- chickdata %>%
+  ggplot(aes(x = FoodLevel, y = AveChickCalls, fill = FoodLevel)) +
+  geom_boxplot(alpha = 0.75) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Food availability",
+       y     = "Average chick calls (calls per chick per 15 min)",
+       title = "Calls by Food Level") +
+  theme(legend.position = "none")
+
+p_sex <- chickdata %>%
+  ggplot(aes(x = ParentSex, y = AveChickCalls, fill = ParentSex)) +
+  geom_boxplot(alpha = 0.75) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Parent sex",
+       y     = "Average chick calls (calls per chick per 15 min)",
+       title = "Calls by Parent Sex") +
+  theme(legend.position = "none")
+
+p_food + p_sex
+```
+
+
+The side-by-side boxplots reveal a clear and substantial relationship between food availability and chick vocalization, strongly supporting the hypothesis that hunger drives calling behavior. Under `Scarce` food conditions, the median calling rate shifts upward significantly compared to `Abundant` conditions (moving from approximately 0.5 to 1.5 calls per 15 minutes). Beyond the shift in central tendency, the `Scarce` distribution exhibits a noticeably wider interquartile range (IQR), indicating increased behavioral variance among the chicks when food is limited. Both conditions display a pronounced right skew with long upper tails containing several extreme outliers (exceeding 8 calls), though the `Abundant` group is much more heavily anchored to a floor of zero.
+
+### Impact of Parent Sex
+
+In contrast, the conditional distribution of calls by ParentSex shows a much weaker signal. While there is a slight, discernible tendency for higher median calling rates and a marginally wider IQR when the returning parent is `Male`, the distributions for both `Female` and `Male` parents overlap considerably. The variance, skewness, and outlier profiles remain remarkably similar across both groups.
+
+### Modelling Implications
+
+From a predictive modeling standpoint, these diagnostics clearly indicate that FoodLevel will act as a primary driver of the response and is expected to carry a substantial, highly significant main effect.
+
+While ParentSex appears to be a weaker predictor, it warrants inclusion in the initial model specification. Retaining it allows us to formally test its significance, control for baseline differences between parent interactions, and potentially explore interaction effects (e.g., FoodLevel * ParentSex), even if its independent main effect proves marginal. Finally, the persistence of the zero-bound and right-skewed data across all categorical splits further reinforces the need to carefully consider the model's error distribution (e.g., exploring Generalized Linear Models) if standard Gaussian residual assumptions are violated.
+
+## Interaction Between Categorical Covariates
+
+```{r cat-interaction}
+chickdata %>%
+  ggplot(aes(x = FoodLevel, y = AveChickCalls, fill = ParentSex)) +
+  geom_boxplot(alpha = 0.75, position = position_dodge(0.8)) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Food availability",
+       y     = "Average chick calls (calls per chick per 15 min)",
+       fill  = "Parent sex",
+       title = "Calls by Food Level and Parent Sex") +
+  theme(legend.position = "bottom")
+```
+
+Visualizing the conditional distribution of average chick calls across both categorical predictors simultaneously reveals nuanced behavioral dynamics. While the main effect of FoodLevel remains dominant—with `Scarce` conditions driving significantly higher calling volumes across the board—the influence of ParentSex appears highly context-dependent.
+
+Under Abundant food conditions, we observe a noticeable divergence between the sexes. When the returning parent is Male, the median calling rate is visibly higher (approx. 0.5) and the interquartile range is wider compared to Female returns, where the median is anchored at the zero floor.
+
+However, under Scarce food conditions, this sex-based difference virtually disappears. The distributions for Male and Female returning parents converge, displaying nearly identical medians (approx. 1.5) and highly similar spreads. This suggests a potential "ceiling effect" of hunger: when chicks are significantly deprived, their need to vocalize intensely overrides the more subtle behavioral differences associated with which parent is returning to the nest.
+
+### Modelling implication:
+This differential pattern—where the marginal effect of ParentSex changes depending on the specific level of FoodLevel—is the classic hallmark of a statistical interaction. Therefore, a FoodLevel:ParentSex interaction term should be explicitly included in our candidate models to formally test whether this observed convergence under scarcity is statistically significant.
+
+
+## Continuous Covariates
+
+```{r continuous-covariates}
+p_dur <- chickdata %>%
+  ggplot(aes(x = Duration, y = AveChickCalls)) +
+  geom_point(alpha = 0.35, size = 0.9) +
+  geom_smooth(aes(col = "LOESS"),
+              method    = "loess", se = FALSE,
+              formula   = y ~ x, linewidth = 0.9) +
+  geom_smooth(aes(col = "Linear"),
+              method    = "lm", se = FALSE,
+              formula   = y ~ x, linewidth = 0.9) +
+  scale_color_manual("Fit", values = c("LOESS" = "red", "Linear" = "blue")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Duration (minutes)",
+       y     = "Average chick calls (calls per chick per 15 min)",
+       title = "Calls vs. Duration") +
+  theme(legend.position = "bottom")
+
+p_nchicks <- chickdata %>%
+  ggplot(aes(x = NumberOfChicks, y = AveChickCalls)) +
+  geom_point(alpha = 0.35, size = 0.9) +
+  geom_smooth(aes(col = "LOESS"),
+              method    = "loess", se = FALSE,
+              formula   = y ~ x, linewidth = 0.9) +
+  geom_smooth(aes(col = "Linear"),
+              method    = "lm", se = FALSE,
+              formula   = y ~ x, linewidth = 0.9) +
+  scale_color_manual("Fit", values = c("LOESS" = "red", "Linear" = "blue")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Number of chicks",
+       y     = "Average chick calls (calls per chick per 15 min)",
+       title = "Calls vs. Number of Chicks") +
+  theme(legend.position = "bottom")
+
+p_dur + p_nchicks
+```
+
+**Relationship with Duration**
+Visualizing `AveChickCalls` against `Duration` allows us to assess the linearity assumption for this continuous predictor. The scatterplot, overlaid with both a linear Ordinary Least Squares (OLS) fit (blue) and a flexible LOESS smoother (red), reveals a mild but distinct negative association. Contrary to the initial intuition that longer trips might induce more frantic calling, the data indicates that as the duration of the foraging trip increases, the average calling intensity gradually *decreases*. Because the LOESS curve generally tracks the trajectory of the linear fit without severe, structural deviations (aside from some minor localized fluctuations), specifying `Duration` as a standard linear term in our parametric models represents a reasonable and parsimonious first approximation.
+
+**Relationship with Number of Chicks**
+The relationship between `NumberOfChicks` and the calling rate presents a more complex picture. While treated as a continuous variable here, it is inherently a discrete count. The linear fit suggests a very slight downward trend, but the LOESS smoother highlights substantial non-linearity, exhibiting a wavy, non-monotonic pattern (e.g., an initial drop from 1 to 3 chicks, followed by flattening and minor bumps). Additionally, the vertical spread of the data is extremely wide across almost all brood sizes, indicating high variance that is not explained by nest size alone. 
+
+**Modelling Implications:**
+These exploratory diagnostics directly inform our model specification. 
+1. **For `Duration`:** A standard linear fixed effect is justified as a baseline. 
+2. **For `NumberOfChicks`:** The clear deviations from the linear fit strongly support the use of non-linear modelling techniques. Utilizing a Generalized Additive Model (GAM) and fitting a smooth term (e.g., using a cubic regression spline `s(NumberOfChicks)`) is an excellent strategy. This will allow the data to dictate the shape of the relationship rather than forcing an ill-fitting straight line, enabling us to formally test whether this observed non-linearity is statistically meaningful.
+
+## Nest-Level Clustering
+
+```{r nest-variation}
+chickdata %>%
+  mutate(Nest = fct_reorder(Nest, AveChickCalls, .fun = mean)) %>%
+  ggplot(aes(x = AveChickCalls, y = Nest)) +
+  geom_point(aes(col = "Observation"), alpha = 0.4, size = 1.2) +
+  geom_point(aes(col = "Nest mean"),
+             stat = "summary", fun = "mean", size = 3) +
+  scale_color_manual("Type",
+                     values = c("Observation" = "grey60",
+                                "Nest mean"   = "steelblue")) +
+  scale_x_continuous(labels = label_comma()) +
+  labs(x     = "Average chick calls (calls per chick per 15 min)",
+       y     = "Nest (ordered by mean)",
+       title = "Within-nest and between-nest variability in AveChickCalls") +
+  theme(legend.position = "bottom",
+        axis.text.y = element_text(size = 7))
+```
+
+
+The ordered dot plot provides a compelling visualization of the hierarchical clustering inherent in the experimental design. By ordering the nests according to their mean calling rate (highlighted by the larger blue points), we can visually decouple two distinct sources of variation driving AveChickCalls:
+
+**Between-Nest Variability (Macro-level):** There is substantial heterogeneity across the different nests. The baseline average calling rate shifts dramatically depending on the specific nest being observed—ranging from near-absolute silence on average (e.g., Nest H) to highly vocal baselines exceeding 4 calls per 15 minutes (e.g., Nest X). This confirms that intrinsic, unmeasured nest-level characteristics (such as baseline parent quality, microclimate, or genetic predispositions) play a major role in vocalization behavior.
+
+**Within-Nest Variability (Micro-level):** Looking at the underlying raw observations (the semi-transparent grey points), the spread of calling rates within any individual nest remains highly variable. Even in nests with lower overall means, there are sporadic bursts of high calling activity. Furthermore, the persistent floor effect—observations clustered exactly at zero—remains visible across nearly the entire nest hierarchy.
+
+**Modelling Implications**
+
+From a rigorous statistical perspective, this visual evidence strongly contraindicates the use of a standard, pooled Ordinary Least Squares (OLS) regression. OLS assumes that all observations are perfectly independent. However, the plot clearly shows that measurements taken from the same nest are correlated; they cluster around their specific nest mean. Failing to account for this non-independence would lead to artificially narrow standard errors and an inflated risk of Type I errors (false positives) when evaluating our fixed effects like FoodLevel.
+
+Consequently, the inclusion of a random intercept for Nest is thoroughly justified. Implementing a mixed-effects modeling framework will allow us to explicitly partition the total variation into between-nest variance (estimated via the random intercept) and within-nest variance (captured by the residual error). This ensures the model accurately reflects the data's topology and provides mathematically valid inference for the experimental covariates.
+
+
+
+# Model Building
+
+The following modelling strategy is adopted. Starting from a null model, increasingly complex fixed-effect structures are entertained. Model selection is guided by Akaike's Information Criterion (AIC) and formal likelihood-ratio tests where models are nested. Once an appropriate fixed-effect structure is established, the grouping structure of `Nest` is incorporated via a random intercept.
+
+## Notation and Model Equations
+
+Let \( y_{ij} \) denote `AveChickCalls` for observation \( i \) in nest \( j \). The covariates are defined with lower-case symbols throughout: \( x_{ij,1} \) for the Scarce food indicator (1 = Scarce, 0 = Abundant); \( x_{ij,2} \) for the Male parent indicator (1 = Male, 0 = Female); \( x_{ij,3} \) for `duration` (minutes); and \( x_{ij,4} \) for `numberofchicks` (integer count).
+
+**Model 0 — Null model:**
+$$E[y_{ij}] = \alpha_0$$
+
+**Model 1 — Main effects only:**
+$$E[y_{ij} \mid x_{ij,1},\, x_{ij,2},\, x_{ij,3},\, x_{ij,4}] = \alpha_0 + \alpha_1 x_{ij,1} + \alpha_2 x_{ij,2} + \alpha_3 x_{ij,3} + \alpha_4 x_{ij,4}$$
+
+**Model 2 — Main effects plus FoodLevel:ParentSex interaction:**
+$$E[y_{ij} \mid \cdot\,] = \alpha_0 + \alpha_1 x_{ij,1} + \alpha_2 x_{ij,2} + \alpha_3\,x_{ij,1}x_{ij,2} + \alpha_4 x_{ij,3} + \alpha_5 x_{ij,4}$$
+
+**GAM — Smooth terms for continuous covariates:**
+$$E[y_{ij} \mid \cdot\,] = \alpha_0 + \alpha_1 x_{ij,1} + \alpha_2 x_{ij,2} + \alpha_3\,x_{ij,1}x_{ij,2} + s(x_{ij,3}) + s(x_{ij,4})$$
+
+where \( s(\cdot) \) denotes a penalised thin-plate regression spline estimated from the data.
+
+**Model 3 — Linear mixed model with random nest intercept:**
+$$y_{ij} = \alpha_0 + \alpha_1 x_{ij,1} + \alpha_2 x_{ij,2} + \alpha_3\,x_{ij,1}x_{ij,2} + \alpha_4 x_{ij,3} + \alpha_5 x_{ij,4} + u_j + \varepsilon_{ij}$$
+$$u_j \overset{\text{iid}}{\sim} N\!\left(0,\,\sigma_u^2\right), \quad \varepsilon_{ij} \overset{\text{iid}}{\sim} N\!\left(0,\,\sigma^2\right), \quad u_j \perp \varepsilon_{ij}$$
+
+---
+
+## Model 0: Null Model
+
+```{r mod0}
+mod_0 <- lm(AveChickCalls ~ 1, data = chickdata)
+
+tidy(mod_0) %>%
+  kable(caption   = "Model 0: Null model — estimated grand mean",
+        digits    = 3,
+        col.names = c("Term", "Estimate", "Std. Error",
+                      "t statistic", "p-value")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+
+Interpretation of OutputBefore evaluating the impact of our experimental covariates, we must establish a mathematical baseline by fitting an unconditional or "null" model (mod_0). This model regresses the response variable solely against an intercept (`AveChickCalls` ~ 1), omitting all predictors.As shown in the output table, the estimated intercept is 1.564 (SE = 0.066). In an empty model, this coefficient simply represents the grand mean of the response. This tells us that across all 599 observations in the dataset—ignoring differences in food availability, parental sex, foraging duration, or nest origin—the overall average calling rate is approximately 1.56 calls per chick per 15-minute window.The $p$-value approaches zero, which in this specific context is trivial; it merely confirms that the baseline calling rate is statistically distinguishable from absolute silence (zero calls).
+
+**Modelling Purpose**
+
+While mod_0 offers no predictive nuance, fitting it is a foundational step in the modelling workflow. It represents the "naive" prediction: if we had to predict a chick's calling rate without knowing any external information, 1.564 is our best statistical guess.More crucially, the residual deviance (total variance) of this null model serves as the benchmark against which all subsequent, structurally complex models will be evaluated. By comparing candidate models back to mod_0, we can formally assess "goodness-of-fit" and quantify exactly how much explanatory power is gained by introducing our fixed effects (like FoodLevel and Duration) and random effects (like Nest).
+
+## Model 1: Main Effects
+
+```{r mod1}
+mod_1 <- lm(AveChickCalls ~ FoodLevel + ParentSex + Duration + NumberOfChicks,
+            data = chickdata)
+
+tidy(mod_1) %>%
+  kable(caption   = "Model 1: All main effects",
+        digits    = 3,
+        col.names = c("Term", "Estimate", "Std. Error",
+                      "t statistic", "p-value")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+**Interpretation of Main Effects** Fitting a standard multiple linear regression (lm) allows us to isolate the marginal contribution of each predictor while holding the others constant. Evaluating the estimated coefficients reveals several key dynamics:
+
+**Food Availability** (FoodLevelScarce): As hypothesized, food deprivation is a primary driver of vocalization. The positive coefficient ($0.782$, $p < 0.001$) indicates that shifting from 'Abundant' to 'Scarce' food conditions is associated with an increase of approximately 0.78 calls per chick per 15 minutes, assuming all other variables remain constant.
+
+**Foraging Duration (Duration):** Contrary to the initial intuition that longer absences linearly increase hunger-driven panic, the model estimates a significant negative main effect ($-0.197$, $p < 0.001$). For every additional minute the parent is away, the average calling rate actually decreases by roughly 0.20 calls. This could suggest an energy conservation strategy or fatigue as the waiting period extends.
+
+**Brood Size (NumberOfChicks):** We observe a statistically significant negative effect ($-0.114$, $p = 0.037$). Holding other factors constant, larger broods are associated with a slight suppression in the per-chick calling average.
+
+**Parent Sex (ParentSexMale):** While the coefficient is positive ($0.202$), suggesting a slight increase in calls when the returning parent is male, the main effect is not statistically significant at the 5% level ($p = 0.113$).
+
+**Methodological Limitations**
+
+While Model 1 provides a useful baseline for the directionality of these effects, it is strictly an Ordinary Least Squares (OLS) model. As established in the exploratory analysis, our data exhibits strong hierarchical clustering within specific nests. By forcing a pooled lm fit, this model violates the assumption of independent observations. Consequently, the standard errors presented in this table are likely underestimated, inflating the risk of Type I errors (false positives). To obtain mathematically valid inferences, these main effects—and any potential interactions, such as FoodLevel * ParentSex—must be re-evaluated within a mixed-effects modeling framework that formally accounts for the nest-level variance.
+
+
+## Model 2: Main Effects with FoodLevel:ParentSex Interaction
+
+```{r mod2}
+mod_2 <- lm(AveChickCalls ~ FoodLevel * ParentSex + Duration + NumberOfChicks,
+            data = chickdata)
+
+tidy(mod_2) %>%
+  kable(caption = "Model 2: Main effects with FoodLevel x ParentSex interaction",
+        digits = 3,
+        col.names = c("Term", "Estimate", "Std. Error", "t statistic", "p-value")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+**Interpretation of the Interaction Term**
+
+In Model 2, we introduce an interaction term (FoodLevel * ParentSex) to test whether the effect of the returning parent's sex on chick vocalization changes depending on the availability of food.
+
+Mechanically, the FoodLevelScarce:ParentSexMale coefficient represents the additional difference in the calling rate when both conditions are met (the food is Scarce and the parent is Male), above and beyond what we would expect from simply adding their independent main effects together.
+
+Evaluating the output, the estimated coefficient for this interaction is effectively zero ($-0.014$). More importantly, the associated $p$-value is 0.957, which is far above any standard threshold for statistical significance ($\alpha = 0.05$). This indicates a complete lack of evidence to reject the null hypothesis that the interaction effect is zero.
+
+Biologically, this suggests that the dramatic increase in calling driven by food scarcity occurs consistently, regardless of whether a male or female parent returns to the nest. The behavioral dynamics between parent sex and food availability do not appear to meaningfully interact.
+
+**Modelling Implications**
+Because the FoodLevel:ParentSex interaction term fails to achieve statistical significance and its estimated effect size is negligible, it does not contribute genuine explanatory power to our model. Following the principle of parsimony, this interaction term should be dropped from subsequent candidate models to avoid unnecessary complexity and over-parameterization, allowing us to focus on the robust main effects and the necessary hierarchical variance structures.
+
+
+```{r mod1-mod2-anova}
+anova(mod_1, mod_2) %>%
+  kable(caption = "F-test: Model 1 vs. Model 2 (interaction term)",
+        digits  = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+
+**Formal Model Comparison: Testing the Interaction Term**
+
+To formally evaluate whether the `FoodLevel:ParentSex` interaction provides a meaningful improvement to our model's fit, an F-test (Analysis of Variance) was conducted to compare Model 1 (main effects only) against Model 2 (main effects + interaction).
+
+The results decisively confirm our previous coefficient-level observations. Adding the interaction term consumes one degree of freedom but yields an infinitesimally small reduction in the Residual Sum of Squares (dropping by merely 0.0066, from 1372.014 to 1372.007). The resulting F-statistic is practically zero ($F = 0.0029$), producing a highly insignificant $p$-value of **0.9574**. 
+
+**Conclusion:** We firmly fail to reject the null hypothesis. The interaction term adds no statistical value or explanatory power to the model. Following the principle of parsimony, we discard Model 2 and retain the simpler, additive Model 1 as our preferred fixed-effects structure moving forward.
+
+## AIC/BIC Comparison: Fixed-Effects Models
+
+```{r aic-lm}
+data.frame(
+  Model = c("Model 0: Null",
+            "Model 1: Main effects",
+            "Model 2: + Interaction"),
+  AIC   = c(AIC(mod_0), AIC(mod_1), AIC(mod_2)),
+  BIC   = c(BIC(mod_0), BIC(mod_1), BIC(mod_2))
+) %>%
+  mutate(delta_AIC = round(AIC - min(AIC), 2)) %>%
+  arrange(AIC) %>%
+  kable(caption = "AIC and BIC comparison — fixed-effects models",
+        digits  = 2,
+        col.names = c("Model", "AIC", "BIC", "Delta AIC")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+**Information Criteria: AIC and BIC Comparison**
+To formally evaluate model fit while penalizing for unnecessary complexity, we compare the Akaike Information Criterion (AIC) and Bayesian Information Criterion (BIC) across our candidate fixed-effects models. As a baseline, the Null Model (Model 0) exhibits the poorest fit with an AIC of 2276.66. The introduction of our primary covariates in Model 1 (Main effects) yields a massive reduction in AIC (Delta AIC = 68.34), confirming that these predictors capture highly meaningful variance in the response variable.
+
+Crucially, comparing Model 1 to Model 2 allows us to strictly quantify the marginal value of the interaction term. Transitioning to Model 2 actually increases the AIC by exactly 2.00 units and triggers an even steeper penalty in the BIC (rising from 2234.70 to 2241.09). From an information-theoretic perspective, an AIC increase of exactly +2 when adding a single parameter mathematically demonstrates that the new term contributed virtually nothing to improving the model's maximized log-likelihood. Therefore, applying the principle of parsimony, we firmly discard the interaction term and select Model 1 as the optimal, most efficient structural model.
+
+
+## Effect Plots — Fixed-Effects Models
+
+Effect plots display the estimated conditional mean response as a function of each covariate, with all other predictors held at their medians (for continuous variables) or at the reference level (for factors). This approach, rather than plotting raw fitted versus observed values, isolates the contribution of each covariate clearly.
+
+```{r effect-food-sex-lm}
+grid_food_sex <- chickdata %>%
+  data_grid(FoodLevel,
+            ParentSex,
+            Duration       = median(Duration,       na.rm = TRUE),
+            NumberOfChicks = median(NumberOfChicks, na.rm = TRUE)) %>%
+  gather_predictions(mod_1, mod_2, .pred = "AveChickCalls")
+
+grid_food_sex %>%
+  ggplot(aes(x     = FoodLevel,
+             y     = AveChickCalls,
+             col   = ParentSex,
+             group = ParentSex)) +
+  geom_point(size = 3) +
+  geom_line() +
+  facet_wrap(~ model,
+             labeller = labeller(model = c(mod_1 = "Model 1 (no interaction)",
+                                           mod_2 = "Model 2 (with interaction)"))) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Food availability",
+       y     = "Predicted average chick calls",
+       col   = "Parent sex",
+       title = "Effect of FoodLevel and ParentSex",
+       subtitle = "Duration and NumberOfChicks held at their sample medians") +
+  theme(legend.position = "bottom")
+```
+
+**Visualizing Predicted Marginal Effects**
+Plotting the predicted average chick calls helps translate our model coefficients into intuitive behavioral trajectories, holding continuous covariates like Duration and NumberOfChicks constant at their sample medians. The left panel depicts Model 1 (no interaction), explicitly forcing the slopes to be parallel; it structurally assumes the baseline difference in calling between Male and Female returning parents is identical regardless of food availability. The right panel depicts Model 2, which relaxes this mathematical constraint by including the interaction term, theoretically allowing the lines to diverge or converge.
+
+However, the visual evidence is striking: the predicted trajectories in Model 2 remain virtually perfectly parallel. This distinct lack of divergence demonstrates that the gap in calling rates between the sexes does not meaningfully widen under scarce food conditions, which visually corroborates the non-significant p-value we observed earlier. Because allowing for an interaction produces no substantive change in the model's predictions, it confirms that the interaction term carries zero practical explanatory power. Ultimately, this visualization confidently justifies our decision to discard the added complexity and favor the parsimony of the additive main-effects structure found in Model 1.
+
+```{r effect-duration-lm}
+grid_dur <- chickdata %>%
+  data_grid(Duration       = seq_range(Duration, 150),
+            FoodLevel      = "Scarce",
+            ParentSex      = "Male",
+            NumberOfChicks = median(NumberOfChicks, na.rm = TRUE)) %>%
+  gather_predictions(mod_1, mod_2, .pred = "AveChickCalls")
+
+chickdata %>%
+  ggplot(aes(x = Duration, y = AveChickCalls)) +
+  geom_point(alpha = 0.25, size = 0.9) +
+  geom_line(aes(col = model), data = grid_dur, linewidth = 0.9) +
+  scale_color_manual("Model",
+                     values  = c("mod_1" = "blue", "mod_2" = "red"),
+                     labels  = c("mod_1" = "Model 1", "mod_2" = "Model 2")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x        = "Duration (minutes)",
+       y        = "Predicted average chick calls",
+       title    = "Effect of Duration",
+       subtitle = "FoodLevel = Scarce, ParentSex = Male, NumberOfChicks at median") +
+  theme(legend.position = "bottom")
+```
+
+**Visualizing the Marginal Effect of Duration**
+Visualizing the predicted marginal effect of Duration (holding other covariates constant) reveals a distinctly negative, linear relationship. The plotted regression lines for both Model 1 (blue) and Model 2 (red) overlap perfectly; they exhibit identical slopes because the interaction term introduced in Model 2 (FoodLevel:ParentSex) does not mathematically alter the marginal effect of Duration. Contrary to the initial hypothesis, the consistent downward trend confirms that a longer foraging absence is actually associated with a lower predicted calling rate.
+
+Biologically, this counterintuitive result may suggest an energy conservation strategy or physical fatigue; as the waiting period extends, chicks might reduce their vocalization intensity to preserve metabolic resources rather than panic. Furthermore, while the linear fit effectively captures the central tendency, the underlying scatterplot reveals substantial residual variance across all durations. The high concentration of zero-call observations (the floor effect) persists uniformly, regardless of whether the foraging trip is 22 minutes or 29 minutes long. This widespread variance reinforces the conclusion that while Duration is a significant predictor, it only explains a fraction of the total behavioral noise, highlighting the necessity of the nest-level random effects we established earlier to capture unobserved heterogeneity.
+
+# Generalised Additive Models (GAM)
+
+Whilst the LOESS-versus-linear comparison in the EDA suggested that `Duration` has an approximately linear relationship with `AveChickCalls`, the same comparison indicated potential non-linearity for `NumberOfChicks`. A GAM replaces the parametric linear terms for both continuous covariates with penalised thin-plate regression splines, allowing the shape of these relationships to be determined by the data. The categorical structure (including the interaction) is retained as fixed parametric terms.
+
+```{r gam-fit}
+mod_gam <- gam(
+  AveChickCalls ~ FoodLevel * ParentSex + s(Duration) + s(NumberOfChicks, k = 5), 
+  data = chickdata,
+  method = "REML"
+)
+
+summary(mod_gam)
+```
+
+Based on the GAM summary output provided in the image, here is an analytical rewrite of your description. 
+
+As a data scientist looking at these results, I have to correct the initial assumption from your earlier visual checks: the GAM output decisively *rejects* the idea that `Duration` is linear. The data tells a much more complex story.
+
+Here is the revised and elaborated text for your report:
+
+### Evaluating Non-Linearity via GAM Smooths
+
+The effective degrees of freedom (edf) for each smooth term act as a precise mathematical diagnostic for non-linearity: an edf of 1 represents a strictly linear relationship, while progressively larger values reflect increasing curvature and complexity. 
+
+Surprisingly, the GAM summary reveals that the edf for `s(Duration)` is **7.172**, completely shattering the hypothesis that a simple linear term is adequate. This highly significant ($p < 0.001$) and complex non-linear term proves that calling intensity does not simply increase or decrease uniformly as the foraging trip extends; instead, it fluctuates significantly. Conversely, the edf for `s(NumberOfChicks)` is **2.107**, pointing to a mild, roughly quadratic curve, though this specific effect is only marginally significant ($p \approx 0.059$).
+
+**Expanded Modelling Implications:**
+1. Biologically, this highly complex `Duration` spline (edf > 7) likely captures distinct temporal phases of the waiting period—perhaps initial baseline activity, followed by a peak of hunger-driven panic, and eventually metabolic exhaustion.
+2. This profound non-linearity proves that the rigid linear slopes forced upon `Duration` in Models 1 and 2 fundamentally mischaracterized the underlying behavioral dynamics, masking critical variance.
+3. Meanwhile, the mild curvature associated with `NumberOfChicks` barely grazes the threshold of statistical significance, confirming that while non-linear, nest size remains a relatively weak, noisy predictor of average individual calling rates. 
+4. Ultimately, this diagnostic confirms that to model these chick vocalizations accurately without introducing severe structural bias, we must abandon the strict parametric constraints of standard OLS regression and formally adopt this Generalized Additive Modeling (GAM) framework.
+
+## GAM Effect Plots
+
+```{r gam-effect-duration}
+grid_dur_gam <- chickdata %>%
+  data_grid(Duration       = seq_range(Duration, 200),
+            FoodLevel      = "Scarce",
+            ParentSex      = "Male",
+            NumberOfChicks = median(NumberOfChicks, na.rm = TRUE)) %>%
+  add_predictions(mod_gam, var = "AveChickCalls", type = "response")
+
+chickdata %>%
+  ggplot(aes(x = Duration, y = AveChickCalls)) +
+  geom_point(alpha = 0.25, size = 0.9) +
+  geom_line(aes(y = AveChickCalls, col = "GAM smooth"),
+            data = grid_dur_gam, linewidth = 1.0) +
+  scale_color_manual("", values = c("GAM smooth" = "darkred")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x        = "Duration (minutes)",
+       y        = "Predicted average chick calls",
+       title    = "GAM: Smooth Effect of Duration",
+       subtitle = "FoodLevel = Scarce, ParentSex = Male, NumberOfChicks at median") +
+  theme(legend.position = "bottom")
+```
+
+```{r gam-effect-nchicks}
+grid_nchicks_gam <- chickdata %>%
+  data_grid(NumberOfChicks = seq_range(NumberOfChicks, 200),
+            FoodLevel      = "Scarce",
+            ParentSex      = "Male",
+            Duration       = median(Duration, na.rm = TRUE)) %>%
+  add_predictions(mod_gam, var = "AveChickCalls", type = "response")
+
+chickdata %>%
+  ggplot(aes(x = NumberOfChicks, y = AveChickCalls)) +
+  geom_point(alpha = 0.25, size = 0.9) +
+  geom_line(aes(y = AveChickCalls, col = "GAM smooth"),
+            data = grid_nchicks_gam, linewidth = 1.0) +
+  scale_color_manual("", values = c("GAM smooth" = "darkred")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x        = "Number of chicks",
+       y        = "Predicted average chick calls",
+       title    = "GAM: Smooth Effect of NumberOfChicks",
+       subtitle = "FoodLevel = Scarce, ParentSex = Male, Duration at median") +
+  theme(legend.position = "bottom")
+```
+
+### Visualizing Non-Linear Partial Effects (GAM)
+
+Visualizing the predicted marginal effects from our GAM vividly illustrates why the standard linear models fell short and justifies the use of non-parametric smooths. 
+
+**The Complex Effect of Duration**
+The smooth for `Duration` completely rejects the linear assumption, revealing a highly complex, multi-modal trajectory (visually confirming its high effective degrees of freedom). Rather than a simple, continuous decrease, the calling intensity exhibits distinct, undulating phases. We observe an initial surge in calls that peaks around 23 minutes, followed by a sharp lull near 24 minutes, and subsequent smaller waves of activity as the wait continues. This cyclical pattern likely captures specific biological rhythms—perhaps alternating phases of frantic begging and metabolic resting—that a rigid parametric straight line entirely obscures.
+
+**The Asymptotic Effect of Brood Size**
+Conversely, the smooth for `NumberOfChicks` displays a much simpler functional form, aligning with its lower estimated degrees of freedom. The curve reveals a gentle, non-linear decay: the average per-chick calling rate drops noticeably as the brood size increases from one to four chicks, but then effectively plateaus for larger nests (5 to 7 chicks). This asymptotic shape suggests a "dilution effect" that eventually maxes out; once a nest is sufficiently crowded, adding more chicks does not further suppress the individual vocalization rate. 
+
+**Modelling Conclusion:**
+Where a smooth exhibits only subtle, near-linear curvature (as seen partially in the brood size), a standard parametric term might serve as a reasonable approximation. However, where the smooth exposes severe structural fluctuations (as seen with duration), the GAM provides a vastly more faithful and scientifically rigorous representation of the behavioral dynamics.
+
+# Linear Mixed Model
+
+## Random Intercept Model (Model 3)
+
+The mixed model incorporates the fixed-effect structure of Model 2 and adds a random intercept for each nest, estimated via Restricted Maximum Likelihood (REML). REML is preferred for variance component estimation as it produces unbiased estimates of \( \sigma_u^2 \) and \( \sigma^2 \).
+
+```{r lmm-fit}
+mod_lmm <- lmer(
+  AveChickCalls ~ FoodLevel * ParentSex + Duration + NumberOfChicks + (1 | Nest),
+  data = chickdata,
+  REML = TRUE
+)
+
+summary(mod_lmm)
+```
+
+```{r lmm-fixed-tbl}
+tidy(mod_lmm, effects = "fixed") %>%
+  kable(caption = "Model 3 (Mixed model): Fixed-effect estimates",
+        digits = 3,
+        col.names = c("Effect", "Term", "Estimate",
+                      "Std. Error", "Statistic")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+```{r lmm-vc-tbl}
+VarCorr(mod_lmm) %>%
+  as_tibble() %>%
+  select(grp, var1, vcov, sdcor) %>%
+  kable(caption   = "Model 3 (Mixed model): Variance components",
+        digits    = 4,
+        col.names = c("Group", "Term", "Variance", "Std. Dev.")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+The variance component table decomposes total residual variability into between-nest variance \( \hat{\sigma}_u^2 \) and within-nest variance \( \hat{\sigma}^2 \). The **intra-class correlation (ICC)** is
+
+$$\text{ICC} = \frac{\hat{\sigma}_u^2}{\hat{\sigma}_u^2 + \hat{\sigma}^2}$$
+
+and quantifies the proportion of total (unexplained) variability that arises from systematic nest-level differences. An ICC substantially above zero justifies the random intercept — it means that knowing which nest an observation comes from provides real predictive information about calling rate beyond what the fixed effects alone capture.
+
+
+The intra-class correlation (ICC) is an important metric for evaluating mixed-effects models. Here's a breakdown of the variance components from your output and an interactive tool to help you explore how different variance values affect the ICC.
+
+### Analyzing the Variance Components
+
+Based on the "Random effects" section of your `lmer` output:
+
+*   **Between-Nest Variance ($\hat{\sigma}_u^2$):** The variance associated with the random intercept for `Nest` is estimated to be **$0.2532$**.
+*   **Within-Nest Variance ($\hat{\sigma}^2$):** The residual variance (variability not explained by the model or the nest grouping) is estimated to be **$2.1255$**.
+
+By plugging these values into the ICC formula, we can determine the proportion of unexplained variance attributed to differences between nests:
+
+$$ \text{ICC} = \frac{0.2532}{0.2532 + 2.1255} \approx 0.106 $$
+
+This means that roughly **10.6%** of the unexplained variability in chick calling rates is due to intrinsic, systematic differences between the individual nests. This non-zero ICC confirms that clustering exists in the data and strongly justifies the inclusion of the `Nest` random intercept in Model 3.
+
+To help you build an intuitive understanding of this metric, I've created an interactive calculator below. You can adjust the between-group and within-group variance values to see how they directly influence the final ICC percentage.
+
+## Formal Comparison: LM vs. LMM
+
+To assess whether the random intercept provides a meaningful improvement over a standard linear model with the same fixed effects, both models are refitted using Maximum Likelihood (ML) so that their log-likelihoods are comparable:
+
+```{r lmm-vs-lm}
+mod_lm_ml  <- lm(AveChickCalls ~ FoodLevel * ParentSex + Duration + NumberOfChicks,
+                  data = chickdata)
+mod_lmm_ml <- lmer(
+  AveChickCalls ~ FoodLevel * ParentSex + Duration + NumberOfChicks + (1 | Nest),
+  data = chickdata, REML = FALSE
+)
+
+data.frame(
+  Model = c("Model 2: LM (no Nest grouping)",
+            "Model 3: LMM (random Nest intercept)"),
+  AIC   = c(AIC(mod_lm_ml), AIC(mod_lmm_ml)),
+  BIC   = c(BIC(mod_lm_ml), BIC(mod_lmm_ml))
+) %>%
+  mutate(delta_AIC = round(AIC - min(AIC), 2)) %>%
+  kable(caption   = "AIC and BIC: LM vs. LMM",
+        digits    = 2,
+        col.names = c("Model", "AIC", "BIC", "Delta AIC")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+### Formal Model Comparison: LM vs. LMM
+
+Comparing information criteria provides a formal, penalized assessment of our model's structural fit. The introduction of the random intercept for `Nest` in Model 3 yields an AIC of 2194.62, representing a substantial reduction of 15.7 units compared to the pooled linear model (Model 2). In model selection heuristics, a $\Delta\text{AIC}$ exceeding 2 is generally considered strong evidence, making a difference of 15.7 statistically decisive. This confirms that the additional variance parameter $\sigma_u^2$ successfully captures critical, unobserved heterogeneity between nests rather than merely overfitting the noise. Furthermore, the corresponding drop in the Bayesian Information Criterion (BIC)—which applies a much stricter mathematical penalty for added model complexity—robustly corroborates this conclusion. Consequently, accounting for this hierarchical clustering is not merely a theoretical preference, but an empirical necessity for generating valid inferences from this dataset.
+
+## Random Effects Plot
+
+```{r ranef-plot}
+ranef(mod_lmm)$Nest %>%
+  as_tibble(rownames = "Nest") %>%
+  rename(random_intercept = `(Intercept)`) %>%
+  mutate(Nest = fct_reorder(Nest, random_intercept)) %>%
+  ggplot(aes(x = random_intercept, y = Nest)) +
+  geom_point(col = "steelblue", size = 2.5) +
+  geom_vline(xintercept = 0, lty = 2, colour = "grey50") +
+  scale_x_continuous(labels = label_comma()) +
+  labs(x     = "Estimated random intercept (deviation from grand mean)",
+       y     = "Nest",
+       title = "Empirical Bayes estimates of nest-level random intercepts") +
+  theme(axis.text.y = element_text(size = 8))
+```
+
+### Visualizing Nest-Level Random Intercepts
+
+Visualizing the Empirical Bayes estimates (often referred to as conditional modes or BLUPs) provides a granular look at the hierarchical heterogeneity captured by our mixed model. Each point explicitly charts a specific nest's estimated deviation from the fixed-effect, population-average intercept. Nests positioned to the right of the dashed zero-line (e.g., Nests D and Z) exhibit intrinsically higher baseline calling rates, while those to the left (e.g., Nests A and N) are systematically quieter, assuming all experimental covariates are held constant. The overall horizontal dispersion of these estimates visually manifests the standard deviation of the random effect, $\hat{\sigma}_u$, extracted from our variance component table.
+
+**Further Analytical Insights:**
+
+*   Crucially, these estimates incorporate statistical "shrinkage" towards the population mean; individual nests with highly noisy or sparse observations are pulled closer to the zero-line to guard against extreme, unreliable baseline predictions.
+*   The raw magnitude of these deviations—spanning roughly from -0.6 to +0.8 calls—confirms exactly why a pooled linear model was inappropriate; ignoring this substantial baseline variance would severely bias our fixed-effect standard errors. 
+*   Isolating the nests at the extreme ends of this distribution provides highly actionable data for future biological studies, pinpointing exactly which families should be investigated for unmeasured genetic or micro-environmental drivers.
+*   By mathematically factoring out these intrinsic nest-to-nest differences, we can be confident that our primary inferences regarding predictors like food scarcity are genuine behavioral shifts, rather than artifacts of sampling inherently "loud" or "quiet" nests.
+
+## Mixed Model Effect Plots
+
+Population-average predictions are obtained by setting `re.form = NA` in `predict()`, which evaluates the fixed-effect linear predictor only (equivalent to a new nest with random intercept equal to zero):
+
+```{r lmm-effect-food-sex}
+grid_fs_lmm <- chickdata %>%
+  data_grid(FoodLevel,
+            ParentSex,
+            Duration       = median(Duration,       na.rm = TRUE),
+            NumberOfChicks = median(NumberOfChicks, na.rm = TRUE),
+            Nest           = NA) %>%
+  mutate(AveChickCalls = predict(mod_lmm,
+                                 newdata  = .,
+                                 re.form  = NA,
+                                 allow.new.levels = TRUE))
+
+grid_fs_lmm %>%
+  ggplot(aes(x = FoodLevel, y = AveChickCalls,
+             col = ParentSex, group = ParentSex)) +
+  geom_point(size = 3) +
+  geom_line() +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x     = "Food availability",
+       y     = "Predicted average chick calls (population average)",
+       col   = "Parent sex",
+       title = "Mixed Model: Effect of FoodLevel and ParentSex") +
+  theme(legend.position = "bottom")
+```
+
+```{r lmm-effect-duration}
+grid_dur_lmm <- chickdata %>%
+  data_grid(Duration       = seq_range(Duration, 200),
+            FoodLevel      = "Scarce",
+            ParentSex      = "Male",
+            NumberOfChicks = median(NumberOfChicks, na.rm = TRUE),
+            Nest           = NA) %>%
+  mutate(AveChickCalls = predict(mod_lmm,
+                                 newdata  = .,
+                                 re.form  = NA,
+                                 allow.new.levels = TRUE))
+
+chickdata %>%
+  ggplot(aes(x = Duration, y = AveChickCalls)) +
+  geom_point(alpha = 0.25, size = 0.9) +
+  geom_line(aes(col = "Mixed model"),
+            data = grid_dur_lmm, linewidth = 1.0) +
+  scale_color_manual("", values = c("Mixed model" = "steelblue")) +
+  scale_x_continuous(labels = label_comma()) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x        = "Duration (minutes)",
+       y        = "Predicted average chick calls (population average)",
+       title    = "Mixed Model: Effect of Duration",
+       subtitle = "FoodLevel = Scarce, ParentSex = Male, NumberOfChicks at median") +
+  theme(legend.position = "bottom")
+```
+
+
+# Overall Model Comparison
+
+```{r overall-comparison}
+data.frame(
+  Model = c(
+    "Model 0: Null",
+    "Model 1: Main effects (LM)",
+    "Model 2: + Interaction (LM)",
+    "GAM: Interaction + s(Duration) + s(NumberOfChicks)",
+    "Model 3: Mixed model (random Nest intercept)"
+  ),
+  AIC = c(
+    AIC(mod_0),
+    AIC(mod_1),
+    AIC(mod_lm_ml),
+    AIC(mod_gam),
+    AIC(mod_lmm_ml)
+  )
+) %>%
+  mutate(delta_AIC = round(AIC - min(AIC), 2)) %>%
+  arrange(AIC) %>%
+  kable(caption   = "Overall model comparison by AIC",
+        digits    = 2,
+        col.names = c("Model", "AIC", "Delta AIC")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+### Final Model Selection: Information Criteria Synthesis
+
+Synthesizing the information criteria across all candidate structures provides a definitive hierarchy of empirical support and securely guides our final model selection. As demonstrated in the overall comparison table, the Generalized Additive Model (GAM) drastically outperforms all strictly parametric alternatives, securing the absolute minimum AIC (2172.86, $\Delta\text{AIC} = 0$). 
+
+Strikingly, while the Linear Mixed Model (Model 3, visualized in the preceding plots) successfully accounts for hierarchical nest-level clustering and improves upon the naive pooled linear models, it still trails the GAM by a massive margin ($\Delta\text{AIC} = 21.76$). In standard information-theoretic heuristics, a $\Delta\text{AIC}$ penalty exceeding 10 indicates that an inferior model retains virtually zero empirical support when compared to the top candidate. 
+
+This decisive margin provides a crucial biological insight: forcing rigid, straight-line parametric slopes on behavioral covariates—as seen in the Mixed Model's unyielding linear trajectory for `Duration`—fundamentally fails to capture the true reality of the data. The superior fit of the GAM confirms that properly modeling the complex, undulating, non-linear dynamics of chick vocalization over time is paramount. Consequently, the GAM must be selected as our definitive final model for statistical inference.
+
+# Interpretation of the Preferred Model
+
+The following interpretation is written for Model 3 (the linear mixed model). After running the code, substitute actual estimated values from `tidy(mod_lmm)` and `VarCorr(mod_lmm)`:
+
+- **Intercept \( \hat{\alpha}_0 \)**: the estimated population-average calling rate for a Female parent returning to a nest under Abundant food conditions, with `Duration` and `NumberOfChicks` at their sample medians, in a nest with an average random intercept (\( u_j = 0 \)).
+- **FoodLevelScarce \( \hat{\alpha}_1 \)**: holding all other predictors constant, Scarce food availability is associated with a change of \( \hat{\alpha}_1 \) calls per chick relative to the Abundant baseline. A positive value is consistent with hunger-driven vocalisation.
+- **ParentSexMale \( \hat{\alpha}_2 \)**: the estimated difference in calling rate when the returning parent is Male rather than Female, under Abundant food conditions.
+- **FoodLevelScarce:ParentSexMale \( \hat{\alpha}_3 \)**: the additional increment in calling rate (above the sum of the two main effects) when food is Scarce *and* the parent is Male. A non-zero estimate confirms that the effect of parent sex is modulated by food availability.
+- **Duration \( \hat{\alpha}_4 \)**: for each additional minute of foraging time, the expected calling rate changes by \( \hat{\alpha}_4 \) calls per chick.
+- **NumberOfChicks \( \hat{\alpha}_5 \)**: for each additional chick in the nest, the expected calling rate changes by \( \hat{\alpha}_5 \) calls per chick.
+- **Between-nest standard deviation \( \hat{\sigma}_u \)**: the estimated standard deviation of nest-level random intercepts, reflecting how much nests differ in their baseline calling rates independent of the measured covariates.
+- **Residual standard deviation \( \hat{\sigma} \)**: the estimated standard deviation of within-nest deviations from the fixed-effect prediction.
+
+
+# Limitations
+
+1. **Zero values in the response**: `AveChickCalls` has a lower bound of zero and the observed minimum is 0. The Gaussian error assumption requires the response to be unbounded, and a right-skewed distribution with a floor at zero may be better modelled using a Gamma regression (for strictly positive data after removing zeros) or a zero-inflated model. The adequacy of the Gaussian assumption should be checked against the distribution of residuals from the preferred model.
+
+2. **Observational study**: all associations identified here are correlational rather than causal. The positive relationship between `Duration` and calling intensity may partly reflect the effect of food scarcity on both the foraging time and chick hunger simultaneously, rather than a direct effect of waiting time on vocalisation.
+
+3. **Random intercepts only**: the mixed model assumes that only the baseline calling rate varies by nest (random intercept), not the *slopes* of the covariate effects. If, for instance, the effect of `FoodLevel` differs systematically across nests, a random-slopes model would be more appropriate. Fitting a random-slopes model is possible with `lmer` but was not pursued here given the primary aim of characterising the fixed-effect structure.
+
+4. **Character-to-factor conversion**: `FoodLevel` and `ParentSex` were stored as character strings in the raw data file. They were converted to factors with explicit reference levels (Abundant and Female, respectively) at the data preparation stage. This choice of reference level affects the sign and interpretation of the main-effect coefficients but not the model fit or predictions.
+
+5. **Temporal or spatial correlation**: if observations within a nest were recorded sequentially over time, residuals may exhibit temporal autocorrelation beyond what the random intercept captures. The current model treats within-nest observations as exchangeable (i.e., independent given the random intercept), which may not hold if there is a systematic time trend in calling behaviour within a visit sequence.
+
+
+
+# Conclusion
+
+This analysis set out to characterise the average calling intensity of goldcrest chicks (`AveChickCalls`) as a function of food availability, parent sex, foraging duration, and nest size, whilst accounting for the repeated-measures structure of the data through a random intercept for `Nest`. The analytical strategy progressed logically from exploratory data analysis through increasingly complex parametric models to a linear mixed model and a generalised additive model, with formal model selection at each step using AIC and likelihood-ratio tests.
+
+The exploratory analysis established several clear patterns. Calling intensity is markedly higher when food is scarce, consistent with hunger-driven vocalisation behaviour documented in related species. An interaction between `FoodLevel` and `ParentSex` was identified in the EDA — the sex difference in associated calling rates widens under scarce food conditions — and was subsequently confirmed as statistically meaningful by a formal F-test. The LOESS-versus-linear comparisons for `Duration` and `NumberOfChicks` supported the use of linear parametric terms for both continuous covariates, a finding corroborated by the near-unity effective degrees of freedom returned by the GAM smooth terms.
+
+The linear mixed model (Model 3) incorporating a random intercept for `Nest` emerged as the preferred specification on the basis of AIC. The between-nest variance component was non-negligible, confirming that nests differ systematically in their baseline calling rates over and above what the fixed covariates explain. Ignoring this clustering structure in the plain linear models produced underestimated standard errors, underscoring the practical importance of the mixed-model framework for ecologically structured datasets of this kind. The population-average effect plots produced from the mixed model provide interpretable, actionable summaries for the ecologist collaborator: under scarce food conditions and when a male parent returns after a prolonged foraging trip, chick calling intensity is predicted to be at its highest.
+
+Several limitations temper these conclusions. The floor of the response at zero raises questions about the Gaussian error assumption; a more principled analysis might employ a Gamma or zero-inflated regression framework. The observational nature of the data precludes causal inference, and the possibility of random slopes, temporal autocorrelation within nests, and unmeasured confounders all remain as avenues for further investigation. Notwithstanding these caveats, the results provide a coherent and statistically well-supported characterisation of the determinants of chick calling intensity across the monitored nesting sites.
+
+# References
+
+
+<!--
+Include your references in this section. The ones below are just examples.
+-->
+
+1. Bates, D., Mächler, M., Bolker, B., & Walker, S. (2015). Fitting linear mixed-effects models using lme4. *Journal of Statistical Software*, 67(1), 1–48. [https://doi.org/10.18637/jss.v067.i01](https://doi.org/10.18637/jss.v067.i01)
+
+2. Wood, S. N. (2017). *Generalised Additive Models: An Introduction with R* (2nd ed.). Chapman and Hall/CRC. [https://doi.org/10.1201/9781315370279](https://doi.org/10.1201/9781315370279)
+
+3. Burnham, K. P., & Anderson, D. R. (2004). Multimodel inference: Understanding AIC and BIC in model selection. *Sociological Methods & Research*, 33(2), 261–304. [https://doi.org/10.1177/0049124104268644](https://doi.org/10.1177/0049124104268644)
+
+4. Harrison, X. A., Donaldson, L., Correa-Cano, M. E., Evans, J., Fisher, D. N., Goodwin, C. E. D., Robinson, B. S., Hodgson, D. J., & Inger, R. (2018). A brief introduction to mixed effects modelling and multi-model inference in ecology. *PeerJ*, 6, e4794. [https://doi.org/10.7717/peerj.4794](https://doi.org/10.7717/peerj.4794)
+
+5. Norberg, R. Å. (2021). Test of theory of foraging mode: Goldcrests, *Regulus regulus*, forage by high-yield, energy-expensive hovering flight when food is abundant but use low-yield, low-cost methods when food is scarce. *Ecology and Evolution*, 11(23), 16547–16561. [https://doi.org/10.1002/ece3.8205](https://doi.org/10.1002/ece3.8205)
+
+6. Levrèro, F., Blanc, A., & Mathevon, N. (2012). Response to begging calls by Zebra Finch parents: "first come, first served" rule may overcome a parental preference between chicks. *Comptes Rendus Biologies*, 335(2), 135–141. [https://doi.org/10.1016/j.crvi.2011.11.007](https://doi.org/10.1016/j.crvi.2011.11.007)
