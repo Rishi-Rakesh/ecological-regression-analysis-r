@@ -42,12 +42,6 @@ intensity of goldcrest chicks?
 ├── chick_calling_analysis.html
 ├── data/
 │   └── chicks.rda
-├── figures/
-│   ├── response_distribution.png
-│   ├── food_parent_interaction.png
-│   ├── continuous_effects.png
-│   └── nest_variation.png
-└── .gitignore
 ```
 
 ## Reproducibility
